@@ -1,12 +1,245 @@
-import os, sys, time, colorama, random, pickle, re
+import os, sys, time, colorama, random, pickle
 colorama.init()
 
 from constants import *
 from console_commands import *
-from bot_commands import *
 
 import discord
 from dotenv import load_dotenv
+
+
+option_version = 4
+
+class Options():
+    def __init__(self):
+        self.version = option_version
+        self.roll_interval = 0.3
+        self.roll_times = 6
+        self.nicknames = {}
+        self.roll_react = True
+        self.debugging = set()
+        self.icon_rolled       = '🎲'
+        self.icon_success      = '✅'
+        self.icon_failed       = '❌'
+        self.icon_catastrophe  = '💀'
+        self.icon_setback      = '💩'
+        # increase version when adding!
+
+hidden_options = set(['debugging', 'nicknames', 'version'])
+
+option_file = 'options.cfg'
+
+def save_options():
+    pickle.dump(options, open(option_file, 'wb'))
+
+def load_options():
+    return pickle.load(open(option_file, 'rb'))
+
+try:
+    options = load_options()
+except Exception:
+    options = Options()
+
+if options.version < option_version:
+    old_options = options
+    options = Options()
+    for k in dir(old_options):
+        if k.startswith('_'): continue
+        setattr(options, k, getattr(old_options, k))
+
+
+def get_name(name):
+    if name in options.nicknames:
+        return f'`{options.nicknames[name]}`'
+    else:
+        return f'`{name}`'
+
+
+def cast(t, v):
+    if t == int:
+        return int(v)
+    elif t == float:
+        return float(v)
+    elif t == bool:
+        v = v.lower()
+        if v == "true" or v == "t":
+            return True
+        elif v == "false" or v == "f":
+            return False
+        return bool(v)
+    else: #string
+        return v
+
+
+commands = {}
+aliases = {}
+command_help = {}
+
+def register(name, alias, help_text):
+    def wrap(f):
+        commands[name] = f
+        command_help[name] = help_text
+        if alias is not None:
+            aliases[alias] = name
+        return f
+    return wrap
+
+
+@register('roll', 'r', '<pool> [<tn>] OR rX[Y] where X and Y are single digit <pool> and <tn>')
+async def roll(message, *args):
+    dice = int(args[0])
+    if len(args) > 1:
+        tn = int(args[1])
+    else:
+        tn = None
+
+    name = get_name(message.author.name)
+    def roll_message(count, target, sorted = False):
+        result = []
+        hits = 0
+        ones = 0
+        for i in range(dice):
+            n = random.randint(1, 6)
+            result.append(n)
+            if n == 1:
+                ones += 1
+            elif n == 5:
+                hits += 1
+            elif n == 6:
+                hits += 2
+        if sorted:
+            result.sort()
+        return name + ': ' + ' '.join((die[x] for x in result)), hits, ones
+
+    if options.roll_times <= 1:
+        msg, hits, ones = roll_message(dice, tn, True)
+        await message.channel.send(msg)
+    else:
+        msg, _, _ = roll_message(dice, tn)
+        roll = await message.channel.send(msg)
+        for i in range(options.roll_times - 2):
+            time.sleep(options.roll_interval)
+            msg, _, _ = roll_message(dice, tn)
+            await roll.edit(content=msg)
+        time.sleep(options.roll_interval)
+        msg, hits, ones = roll_message(dice, tn, True)
+        await roll.edit(content=msg)
+
+    if not options.roll_react: return
+
+    if tn is None:
+        await roll.add_reaction(options.icon_rolled)
+    elif hits >= tn:
+        await roll.add_reaction(options.icon_success)
+    else:
+        await roll.add_reaction(options.icon_failed)
+
+    if tn is not None and hits > tn:
+        benefits = min(hits - tn, 9)
+        for i in range(benefits):
+            await roll.add_reaction(coins[i])
+
+    if ones >= dice / 2:
+        if tn is None or hits < tn:
+            await roll.add_reaction(options.icon_catastrophe)
+        else:
+            await roll.add_reaction(options.icon_setback)
+
+
+@register('config', None, '[<setting> <value>...] sets config options, or use without args to display.')
+async def config(message, *args):
+    if not args:
+        config = []
+        for k in sorted(dir(options)):
+            if not k.startswith("_") and k not in hidden_options:
+                label = k + ':'
+                config.append(f'{label.ljust(20)}{getattr(options, k)}')
+        await dm(message.author, '```\n' + '\n'.join(config) + '```')
+        return
+
+    args = list(args)
+    e = Exception()
+    output = []
+    while args:
+        k = args.pop(0)
+        try:
+            v = args.pop(0)
+        except Exception:
+            output.append('Missing value')
+            break
+        option = getattr(options, k, e)
+        label = k + ':'
+        if option is not e and k not in hidden_options:
+            setattr(options, k, cast(type(option), v))
+            output.append(f'{label.ljust(20)}{getattr(options, k)}')
+        else:
+            output.append(f'{label.ljust(20)}No such option')
+    await dm(message.author, '```\n' + '\n'.join(output) + '```')
+    save_options()
+
+
+@register('reset', None, '<setting>...  resets config option to default value.')
+async def reset(message, *args):
+    defaults = Options()
+    e = Exception()
+    output = []
+    for k in args:
+        default = getattr(defaults, k, e)
+        label = k + ':'
+        if default is not e and k not in hidden_options:
+            setattr(options, k, default)
+            output.append(f'{label.ljust(20)}{getattr(options, k)}')
+        else:
+            output.append(f'{label.ljust(20)}No such option')
+    await dm(message.author, '```\n' + '\n'.join(output) + '```')
+    save_options()
+
+
+@register('alias', None, '<name> : GM will call you by this name')
+async def alias(message, *args):
+    name = ' '.join(args)
+    if name.replace(' ', '') == '':
+        people = []
+        for k in options.nicknames:
+            label = k + ':'
+            people.append(f'{label.ljust(20)}{options.nicknames[k]}')
+        response = '```\n' +  '\n'.join(people) + '```'
+    else:
+        options.nicknames[message.author.name] = name
+        response = f'{message.author.name} will be known as `{name}`'
+    await message.channel.send(response)
+    save_options();
+
+
+@register('alias-off', None, 'Remove your alias')
+async def noalias(message, *args):
+    if message.author.name in options.nicknames:
+        del(options.nicknames[message.author.name])
+    response = f'{message.author.name} will be known as `{message.author.name}`'
+    await message.channel.send(response)
+    save_options();
+
+
+@register('debug', None, 'Turn on debugging, GM will DM you error messages')
+async def debug(message, *args):
+    options.debugging.add(message.author.name)
+    await dm(message.author, "Debugging turned ON")
+
+
+@register('debug-off', None, 'Turn off debug messages')
+async def nodebug(message, *args):
+    options.debugging.remove(message.author.name)
+    await dm(message.author, "Debugging turned OFF")
+
+
+@register('help', '?', 'Display help')
+async def help_cmd(message, *args):
+    help_text = ['```']
+    for name in sorted(commands):
+        help_text.append(f'{name.ljust(10)}{command_help[name]}')
+    help_text.append('```')
+    await dm(message.author, '\n'.join(help_text))
+
 
 load_dotenv()
 
@@ -26,9 +259,7 @@ async def on_ready():
         f'{guild.name}(id: {guild.id})'
     )
 
-    return
-
-    while True:
+    """while True:
         query = input("\n> ")
         parts = query.split(' ')
         if (parts[0] in commands):
@@ -60,92 +291,7 @@ async def on_ready():
 
     await client.logout()
     time.sleep(0.5)
-
-
-
-#die = {
-#    1: '⚀'.lower(),
-#    2: '⚁'.lower(),
-#    3: '⚂'.lower(),
-#    4: '⚃'.lower(),
-#    5: '⚄'.lower(),
-#    6: '⚅'.lower(),
-#}
-
-die = {
-    1: '<:d1:780649001623617592>',
-    2: '<:d2:780649001455452170>',
-    3: '<:d3:780649001506570250>',
-    4: '<:d4:780649001686138881>',
-    5: '<:d5:780649001409708043>',
-    6: '<:d6:780649001690595338>',
-}
-
-coins = [
-    '<:c1:780661517975814194>',
-    '<:c2:780661518521597952>',
-    '<:c3:780661519171715083>',
-    '<:c4:780661519553265664>',
-    '<:c5:780661519721562113>',
-    '<:c6:780661518785052703>',
-    '<:c7:780661519213396009>',
-    '<:c8:780661519381692436>',
-    '<:c9:780661519767175188>',
-]
-
-roll_re = re.compile('^r[0-9]{1,2}')
-debugging = set()
-
-version = 1
-
-class Options():
-    def __init__(self):
-        self.version = version
-        self.roll_interval = 0.3
-        self.roll_times = 6
-        self.nicknames = {}
-        self.roll_react = True
-        # increase version when adding!
-
-option_file = 'options.cfg'
-
-def save_options():
-    pickle.dump(options, open(option_file, 'wb'))
-
-def load_options():
-    return pickle.load(open(option_file, 'rb'))
-
-try:
-    options = load_options()
-except Exception:
-    options = Options()
-
-if options.version < version:
-    old_options = options
-    options = Options()
-    for k in dir(old_options):
-        if k.startswith('_'): continue
-        setattr(options, k, getattr(old_options, k))
-
-def get_name(name):
-    if name in options.nicknames:
-        return options.nicknames[name]
-    else:
-        return name
-
-
-def cast(t, v):
-    if t == int:
-        return int(v)
-    elif t == float:
-        return float(v)
-    elif t == bool:
-        v = v.lower()
-        if v == "true" or v == "t":
-            return True
-        elif v == "false" or v == "f":
-            return False
-        return bool(v)
+"""
 
 
 @client.event
@@ -164,116 +310,24 @@ async def on_message(message):
                 args = [command[1], command[2]]
             else:
                 args = [command[1]]
-            command = 'r'
+            command = 'roll'
 
-        if command == 'r' or command == 'roll':
-            dice = int(args[0])
-            if len(args) > 1:
-                tn = int(args[1])
-            else:
-                tn = None
+        if command in aliases:
+            command = aliases[command]
 
-
-            name = get_name(message.author.name)
-            def roll_message(count, target, sorted = False):
-                result = []
-                hits = 0
-                ones = 0
-                for i in range(dice):
-                    n = random.randint(1, 6)
-                    result.append(n)
-                    if n == 1:
-                        ones += 1
-                    elif n == 5:
-                        hits += 1
-                    elif n == 6:
-                        hits += 2
-                if sorted:
-                    result.sort()
-                return name + ': ' + ' '.join((die[x] for x in result)), hits, ones
-
-            if options.roll_times <= 1:
-                msg, hits, ones = roll_message(dice, tn, True)
-                await message.channel.send(msg)
-            else:
-                msg, _, _ = roll_message(dice, tn)
-                roll = await message.channel.send(msg)
-                for i in range(options.roll_times - 2):
-                    time.sleep(options.roll_interval)
-                    msg, _, _ = roll_message(dice, tn)
-                    await roll.edit(content=msg)
-                time.sleep(options.roll_interval)
-                msg, hits, ones = roll_message(dice, tn, True)
-                await roll.edit(content=msg)
-
-            if not options.roll_react: return
-
-            if tn is None:
-                await roll.add_reaction('🆗')
-            elif hits >= tn:
-                await roll.add_reaction('✅')
-            else:
-                await roll.add_reaction('🛑')
-
-            if tn is not None and hits > tn:
-                benefits = min(hits - tn, 9)
-                for i in range(benefits):
-                    await roll.add_reaction(coins[i])
-
-            if ones >= dice / 2:
-                if tn is None or hits < tn:
-                    await roll.add_reaction('💀')
-                else:
-                    await roll.add_reaction('💩')
-
-
-        elif command == 'config':
-            if not args:
-                config = []
-                for k in sorted(dir(options)):
-                    if not k.startswith("_"):
-                        config.append(f'{k} = {getattr(options, k)}')
-                await dm(message.author, 'Current config:\n' + '\n'.join(config))
-                return
-
-            while args:
-                k = args.pop(0)
-                v = args.pop(0)
-                option = getattr(options, k, None)
-                if option is not None:
-                    setattr(options, k, cast(type(option), v))
-            save_options()
-
-        elif command == 'alias':
-            name = ' '.join(args)
-            options.nicknames[message.author.name] = name
-            response = f'{message.author.name} will be known as {name}'
-            await message.channel.send(response)
-            save_options();
-
-        elif command == 'debug':
-            debugging.add(message.author.name)
-            await dm(message.author, "Debugging turned ON")
-
-        elif command == 'nodebug':
-            debugging.remove(message.author.name)
-            await dm(message.author, "Debugging turned OFF")
-
-        else:
-            return
+        if command in commands:
+            await commands[command](message, *args)
 
     except Exception as e:
         member = message.author
-        if member.name in debugging:
-            await dm(member, "Sorry, I don't understand.  Type `nodebug` to turn off these messages.")
-        print()
-        print(str(e))
-        print()
+        if member.name in options.debugging:
+            await dm(member, f"Error:\n {str(e)}")
 
 
 async def dm(member, message):
     if member.name:
         await member.create_dm()
         await member.dm_channel.send(message)
+
 
 client.run(TOKEN)

@@ -45,14 +45,14 @@ def cmd_quit():
     pass
 
 
-commands = {
+console_commands = {
     'dir':  cmd_dir,
     'print': cmd_print,
     'type': cmd_type,
     'quit': cmd_quit,
 }
 
-aliases = {
+console_aliases = {
     'd': 'dir',
     'p': 'print',
     't': 'type',
@@ -60,5 +60,5 @@ aliases = {
 }
 
 
-for alias in aliases:
-    commands[alias] = commands[aliases[alias]]
+for alias in console_aliases:
+    console_commands[alias] = console_commands[console_aliases[alias]]
