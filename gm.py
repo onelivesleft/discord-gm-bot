@@ -74,6 +74,7 @@ def cast(t, v):
 commands = {}
 aliases = {}
 command_help = {}
+hindrances = {}
 
 def register(name, alias, help_text):
     def wrap(f):
@@ -85,16 +86,31 @@ def register(name, alias, help_text):
     return wrap
 
 
-@register('roll', 'r', '<pool> [<tn>] OR rX[Y] where X and Y are single digit <pool> and <tn>')
+@register('roll', 'r', '<pool> [<tn> [<hindrance>]] OR rP[T[H]] where P, T, and H are single digits')
 async def roll(message, *args):
     dice = int(args[0])
+    report = [f':game_die: `{dice}`']
+
     if len(args) > 1:
         tn = int(args[1])
+        report.append(f':dart: `{tn}`')
     else:
         tn = None
 
-    name = get_name(message.author.name)
-    def roll_message(count, target, sorted = False):
+    if len(args) > 2:
+        hindrance = int(args[2])
+    else:
+        hindrance = 0
+
+    if message.author.name in hindrances:
+        hindrance += hindrances[message.author.name]
+
+    if hindrance > 0:
+        tn += hindrance
+        report.append(f':warning: `{hindrance}`')
+
+    prefix = f'{get_name(message.author.name)} {" ".join(report)}\n'
+    def roll_message(sorted):
         result = []
         hits = 0
         ones = 0
@@ -109,20 +125,24 @@ async def roll(message, *args):
                 hits += 2
         if sorted:
             result.sort()
-        return name + ': ' + ' '.join((die[x] for x in result)), hits, ones
+        if hindrance:
+            h = ' '.join([die[1]] * hindrance) + '  '
+        else:
+            h = ''
+        return prefix + h + ' '.join((die[x] for x in result)), hits, ones + hindrance
 
     if options.roll_times <= 1:
-        msg, hits, ones = roll_message(dice, tn, True)
+        msg, hits, ones = roll_message(True)
         await message.channel.send(msg)
     else:
-        msg, _, _ = roll_message(dice, tn)
+        msg, _, _ = roll_message(False)
         roll = await message.channel.send(msg)
         for i in range(options.roll_times - 2):
             time.sleep(options.roll_interval)
-            msg, _, _ = roll_message(dice, tn)
+            msg, _, _ = roll_message(False)
             await roll.edit(content=msg)
         time.sleep(options.roll_interval)
-        msg, hits, ones = roll_message(dice, tn, True)
+        msg, hits, ones = roll_message(True)
         await roll.edit(content=msg)
 
     if not options.roll_react: return
@@ -139,7 +159,7 @@ async def roll(message, *args):
         for i in range(benefits):
             await roll.add_reaction(coins[i])
 
-    if ones >= dice / 2:
+    if ones >= (dice + hindrance) / 2:
         if tn is None or hits < tn:
             await roll.add_reaction(options.icon_catastrophe)
         else:
@@ -220,6 +240,21 @@ async def noalias(message, *args):
     save_options();
 
 
+@register('hindrance', 'h', '<value> : Set your baseline hindrance (will be added to every roll)')
+async def hindrance_cmd(message, *args):
+    try:
+        hindrances[message.author.name] = int(args[0])
+    except Exception:
+        pass
+    if message.author.name in hindrances:
+        h = hindrances[message.author.name]
+    else:
+        h = 0
+    response = f'{get_name(message.author.name)} has hindrance `{h}`'
+    await message.channel.send(response)
+    save_options();
+
+
 @register('debug', None, 'Turn on debugging, GM will DM you error messages')
 async def debug(message, *args):
     options.debugging.add(message.author.name)
@@ -234,7 +269,7 @@ async def nodebug(message, *args):
 
 @register('help', '?', 'Display help')
 async def help_cmd(message, *args):
-    help_text = ['```']
+    help_text = ['```Type in commands.  Numbers without context will be treated as a roll.\n\nCommands:\n']
     for name in sorted(commands):
         help_text.append(f'{name.ljust(10)}{command_help[name]}')
     help_text.append('```')
@@ -299,17 +334,21 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    args = [x for x in message.content.split(' ') if x]
+    text = message.content
+
+    if autoroll_quick_re.match(text):
+        text = f'r{text}'
+    elif autoroll_re.match(text):
+        text = f'roll {text}'
+
+    args = [x for x in text.split(' ') if x]
 
     if args:
         command = args.pop(0).lower()
 
     try:
         if roll_re.match(command):
-            if len(command) == 3:
-                args = [command[1], command[2]]
-            else:
-                args = [command[1]]
+            args = [x for x in command][1:4]
             command = 'roll'
 
         if command in aliases:
@@ -322,6 +361,7 @@ async def on_message(message):
         member = message.author
         if member.name in options.debugging:
             await dm(member, f"Error:\n {str(e)}")
+        raise(e)
 
 
 async def dm(member, message):

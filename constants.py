@@ -62,4 +62,6 @@ coins = [
     '<:c9:780661519767175188>',
 ]
 
-roll_re = re.compile('^r[0-9]{1,2}')
+roll_re = re.compile('^r[0-9]{1,3}$')
+autoroll_quick_re  = re.compile('^[0-9]{1,3}$')
+autoroll_re = re.compile('^[0-9]+(\s+[0-9]+)?(\s+[0-9]+)?$')
